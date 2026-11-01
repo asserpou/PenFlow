@@ -1,0 +1,43 @@
+# ==========================================
+# Excluded legacy & 3rd-party components
+# ==========================================
+PenFlow-Server/
+OpenTabletDriver-0.6.7_win-x64/
+Start-PenFlow-Server.bat
+*.log
+.appdata/
+.dotnet/
+.dotnet_home/
+nuget.config
+
+# ==========================================
+# Android & Gradle Build Files
+# ==========================================
+PenFlow-Android/.gradle/
+PenFlow-Android/.idea/
+PenFlow-Android/.kotlin/
+PenFlow-Android/local.properties
+PenFlow-Android/build/
+PenFlow-Android/*/build/
+PenFlow-Android/*.iml
+PenFlow-Android/*/*.iml
+PenFlow-Android/.cxx/
+*.apk
+!release/PenFlow.apk
+
+# ==========================================
+# .NET Build Output
+# ==========================================
+**/bin/
+**/obj/
+!release/PenFlow.OTD.Plugin.dll
+*.user
+*.suo
+*.userprefs
+
+# ==========================================
+# OS & Editor generated
+# ==========================================
+.DS_Store
+Thumbs.db
+[Dd]esktop.ini

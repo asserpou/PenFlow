@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>PenFlow.OTD.Plugin</AssemblyName>
+    <RootNamespace>PenFlow.OTD.Plugin</RootNamespace>
+    <Optimize>true</Optimize>
+    <NoWarn>CA2255</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="OpenTabletDriver.Plugin">
+      <HintPath>lib\OpenTabletDriver.Plugin.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="OpenTabletDriver">
+      <HintPath>lib\OpenTabletDriver.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="OpenTabletDriver.Desktop">
+      <HintPath>lib\OpenTabletDriver.Desktop.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
+
