@@ -80,6 +80,19 @@ public static class PenFlowPluginBootstrapper
 
         try
         {
+            string procName = Process.GetCurrentProcess().ProcessName;
+            if (procName.Contains("UX", StringComparison.OrdinalIgnoreCase) ||
+                procName.Contains("Console", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+        }
+        catch
+        {
+        }
+
+        try
+        {
             WriteConfigurationFile();
         }
         catch
@@ -336,72 +349,14 @@ internal sealed class PenFlowNetworkReceiver
 
                 while (!ct.IsCancellationRequested)
                 {
-                    using TcpClient client = listener.AcceptTcpClient();
-                    client.NoDelay = true;
-                    client.ReceiveBufferSize = 4096;
-                    client.SendBufferSize = 4096;
-                    _tcpClientConnected = true;
-                    Log.Write("PenFlow", "Android tablet connected over USB!", LogLevel.Info);
-                    PenFlowPluginBootstrapper.EnsureTabletDetected();
-
-                    try
+                    TcpClient client = listener.AcceptTcpClient();
+                    Thread clientThread = new(() => HandleTcpClient(client, ct))
                     {
-                        using NetworkStream stream = client.GetStream();
-                        byte[] readBuf = new byte[8192];
-                        int filled = 0;
-
-                        while (!ct.IsCancellationRequested)
-                        {
-                            int read = stream.Read(readBuf, filled, readBuf.Length - filled);
-                            if (read <= 0) break;
-                            filled += read;
-
-                            int offset = 0;
-                            while (filled - offset >= PacketSize)
-                            {
-                                if (readBuf[offset] == 0x46 && readBuf[offset + 1] == 0x50)
-                                {
-                                    byte packetType = readBuf[offset + 2];
-                                    if (packetType == 0x02) // TypePing
-                                    {
-                                        try
-                                        {
-                                            stream.Write(readBuf, offset, PacketSize);
-                                            stream.Flush();
-                                        }
-                                        catch { }
-                                    }
-                                    else if (packetType == 0x01) // TypePointer
-                                    {
-                                        byte[] packet = new byte[PacketSize];
-                                        Buffer.BlockCopy(readBuf, offset, packet, 0, PacketSize);
-                                        PenFlowDeviceHub.Instance.PushPacket(packet);
-                                    }
-                                    offset += PacketSize;
-                                }
-                                else
-                                {
-                                    // Resynchronize to next magic byte if stream ever misaligned
-                                    offset += 1;
-                                }
-                            }
-
-                            int remaining = filled - offset;
-                            if (remaining > 0 && offset > 0)
-                            {
-                                Buffer.BlockCopy(readBuf, offset, readBuf, 0, remaining);
-                            }
-                            filled = remaining;
-                        }
-                    }
-                    catch
-                    {
-                    }
-                    finally
-                    {
-                        _tcpClientConnected = false;
-                        Log.Write("PenFlow", "Android tablet USB stream disconnected.", LogLevel.Info);
-                    }
+                        Name = "PenFlow-OTD-USB-Client",
+                        IsBackground = true,
+                        Priority = ThreadPriority.Highest
+                    };
+                    clientThread.Start();
                 }
             }
             catch (SocketException)
@@ -416,6 +371,85 @@ internal sealed class PenFlowNetworkReceiver
             finally
             {
                 try { listener?.Stop(); } catch { }
+            }
+        }
+    }
+
+    private void HandleTcpClient(TcpClient client, CancellationToken ct)
+    {
+        using (client)
+        {
+            try
+            {
+                client.NoDelay = true;
+                client.ReceiveBufferSize = 4096;
+                client.SendBufferSize = 4096;
+                client.ReceiveTimeout = 6000;
+                client.SendTimeout = 2000;
+                _tcpClientConnected = true;
+
+                using NetworkStream stream = client.GetStream();
+                byte[] readBuf = new byte[8192];
+                int filled = 0;
+                bool loggedConnect = false;
+
+                while (!ct.IsCancellationRequested)
+                {
+                    int read = stream.Read(readBuf, filled, readBuf.Length - filled);
+                    if (read <= 0) break;
+                    filled += read;
+
+                    if (!loggedConnect)
+                    {
+                        loggedConnect = true;
+                        Log.Write("PenFlow", "Android tablet connected over USB!", LogLevel.Info);
+                        PenFlowPluginBootstrapper.EnsureTabletDetected();
+                    }
+
+                    int offset = 0;
+                    while (filled - offset >= PacketSize)
+                    {
+                        if (readBuf[offset] == 0x46 && readBuf[offset + 1] == 0x50)
+                        {
+                            byte packetType = readBuf[offset + 2];
+                            if (packetType == 0x02) // TypePing
+                            {
+                                try
+                                {
+                                    stream.Write(readBuf, offset, PacketSize);
+                                    stream.Flush();
+                                }
+                                catch { }
+                            }
+                            else if (packetType == 0x01) // TypePointer
+                            {
+                                byte[] packet = new byte[PacketSize];
+                                Buffer.BlockCopy(readBuf, offset, packet, 0, PacketSize);
+                                PenFlowDeviceHub.SharedEndpoint.PushPacket(packet);
+                            }
+                            offset += PacketSize;
+                        }
+                        else
+                        {
+                            // Resynchronize to next magic byte if stream ever misaligned
+                            offset += 1;
+                        }
+                    }
+
+                    int remaining = filled - offset;
+                    if (remaining > 0 && offset > 0)
+                    {
+                        Buffer.BlockCopy(readBuf, offset, readBuf, 0, remaining);
+                    }
+                    filled = remaining;
+                }
+            }
+            catch
+            {
+            }
+            finally
+            {
+                _tcpClientConnected = false;
             }
         }
     }

@@ -10,32 +10,54 @@ namespace PenFlow.OTD.Plugin;
 [PluginName("PenFlow USB Tablet Hub")]
 public class PenFlowDeviceHub : IDeviceHub
 {
+    private static readonly object HubsLock = new();
+    private static readonly List<PenFlowDeviceHub> ActiveHubs = [];
+
+    public static PenFlowDeviceEndpoint SharedEndpoint { get; } = new();
     public static PenFlowDeviceHub Instance { get; } = new();
 
-    private readonly PenFlowDeviceEndpoint _endpoint = new();
+    public PenFlowDeviceHub()
+    {
+        lock (HubsLock)
+        {
+            if (!ActiveHubs.Contains(this))
+            {
+                ActiveHubs.Add(this);
+            }
+        }
+    }
 
     public event EventHandler<DevicesChangedEventArgs>? DevicesChanged;
 
     public IEnumerable<IDeviceEndpoint> GetDevices()
     {
-        return [_endpoint];
+        return [SharedEndpoint];
     }
 
     public void NotifyDeviceReady()
     {
-        try
+        PenFlowDeviceHub[] hubs;
+        lock (HubsLock)
         {
-            DevicesChanged?.Invoke(this, new DevicesChangedEventArgs([], [_endpoint]));
+            hubs = [.. ActiveHubs];
         }
-        catch (Exception ex)
+
+        foreach (var hub in hubs)
         {
-            Log.Exception(ex);
+            try
+            {
+                hub.DevicesChanged?.Invoke(hub, new DevicesChangedEventArgs([], [SharedEndpoint]));
+            }
+            catch (Exception ex)
+            {
+                Log.Exception(ex);
+            }
         }
     }
 
     internal void PushPacket(byte[] packet24)
     {
-        _endpoint.PushPacket(packet24);
+        SharedEndpoint.PushPacket(packet24);
     }
 }
 
