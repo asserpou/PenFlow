@@ -72,7 +72,7 @@ public class PenFlowDeviceEndpoint : IDeviceEndpoint
         _ => string.Empty
     };
 
-    public IDeviceEndpointStream Open()
+    public virtual IDeviceEndpointStream Open()
     {
         lock (_streamLock)
         {
@@ -81,6 +81,11 @@ public class PenFlowDeviceEndpoint : IDeviceEndpoint
             return _activeStream;
         }
     }
+
+    // Required by OpenTabletDriver v0.6.8+ IDeviceEndpoint interface (while remaining 100% compatible with v0.6.6/v0.6.7)
+    public virtual void OpenAndSendFeatureInit(byte[] initData) { }
+
+    public virtual void OpenAndSendOutputInit(byte[] initData) { }
 
     internal void PushPacket(byte[] packet24)
     {
