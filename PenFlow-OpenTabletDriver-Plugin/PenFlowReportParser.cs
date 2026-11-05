@@ -85,20 +85,16 @@ public class PenFlowReportParser : IReportParser<IDeviceReport>
     private float _deviceWidthMm = 293.76f;  // Defaults to Lenovo Tab P12 12.7" until packet updates it
     private float _deviceHeightMm = 183.60f;
 
-    // Cached OpenTabletDriver Tablet Area from settings.json
-    private float _otdAreaWidthMm = 55.0f;
-    private float _otdAreaHeightMm = 30.9375f;
-    private float _otdAreaCenterXMm = 266.26f;
-    private float _otdAreaCenterYMm = 168.13126f;
-    private long _lastSettingsCheckTick;
-    private DateTime _lastSettingsWriteUtc;
+    // Cached OpenTabletDriver Tablet Area from settings.json (updated asynchronously off the hot input thread)
+    private static volatile float _otdAreaWidthMm = 55.0f;
+    private static volatile float _otdAreaHeightMm = 30.9375f;
+    private static volatile float _otdAreaCenterXMm = 266.26f;
+    private static volatile float _otdAreaCenterYMm = 168.13126f;
+    private static DateTime _lastSettingsWriteUtc;
+    private static readonly Timer SettingsPollTimer = new(_ => RefreshOtdAreaBackground(), null, 0, 1500);
 
-    private void RefreshOtdAreaIfNeeded()
+    private static void RefreshOtdAreaBackground()
     {
-        long nowTick = Environment.TickCount64;
-        if (nowTick - _lastSettingsCheckTick < 1000) return;
-        _lastSettingsCheckTick = nowTick;
-
         try
         {
             string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
@@ -143,8 +139,6 @@ public class PenFlowReportParser : IReportParser<IDeviceReport>
         // Verify magic header 0x5046 ('F', 'P' in little-endian) and PacketType == 0x01 (TypePointer)
         if (report[0] != 0x46 || report[1] != 0x50 || report[2] != 0x01)
             return new DeviceReport(report);
-
-        RefreshOtdAreaIfNeeded();
 
         // Decode physical device active area dimensions (in 0.1mm units) from bytes 22..23
         ushort dimEncoded = BinaryPrimitives.ReadUInt16LittleEndian(report.AsSpan(22, 2));

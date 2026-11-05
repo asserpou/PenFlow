@@ -120,7 +120,7 @@ public sealed class PenFlowEndpointStream : IDeviceEndpointStream
 {
     private readonly object _sync = new();
     private readonly List<byte[]> _queue = new(8);
-    private readonly ManualResetEventSlim _signal = new(false, spinCount: 200);
+    private readonly ManualResetEventSlim _signal = new(false, spinCount: 1000);
     private volatile bool _disposed;
 
     internal void Enqueue(byte[] packet24)
@@ -131,9 +131,26 @@ public sealed class PenFlowEndpointStream : IDeviceEndpointStream
         {
             if (_disposed) return;
 
-            // Bounded low-latency ring buffer (max 16 packets = ~1 frame at 1000Hz)
-            // Preserves full 240Hz/1000Hz sub-frame smoothness while preventing any lag backlog!
-            while (_queue.Count >= 16)
+            // Smart movement coalescing: if OpenTabletDriver hasn't consumed the previous continuous
+            // movement packet (Hover=0 or Move=2) yet, replace it in-place with the latest coordinate
+            // so the cursor jumps directly to the true current pen position with zero trailing lag!
+            if (_queue.Count > 0 && packet24.Length >= 24 && packet24[2] == 0x01)
+            {
+                byte action = packet24[3];
+                if (action == 0 || action == 2)
+                {
+                    int lastIdx = _queue.Count - 1;
+                    byte[] last = _queue[lastIdx];
+                    if (last.Length >= 24 && last[2] == 0x01 && last[3] == action && last[21] == packet24[21])
+                    {
+                        _queue[lastIdx] = packet24;
+                        _signal.Set();
+                        return;
+                    }
+                }
+            }
+
+            while (_queue.Count >= 8)
             {
                 _queue.RemoveAt(0);
             }

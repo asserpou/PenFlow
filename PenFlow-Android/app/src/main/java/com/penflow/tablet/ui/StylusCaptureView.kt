@@ -129,24 +129,14 @@ class StylusCaptureView @JvmOverloads constructor(
     private var lastStylusTime = 0L
     private var hasDetectedActiveStylus = false
     private var activeTouchPointerId = MotionEvent.INVALID_POINTER_ID
-    private val PALM_REJECTION_HOLD_MS = 2500L
+    private val ACTIVE_STYLUS_AUTO_PALM_REJECT_MS = 10_000L
     private var lastTelemetryUpdateMs = 0L
     private var lastTelemetryAction: Byte = -1
     private var lastTelemetryTool: Byte = -1
 
-    // 1x1 invisible pixel heartbeat to prevent Lenovo ZUI SurfaceFlinger from timing out after 2s and dropping 144Hz -> 30Hz
-    private var keepAliveToggle = false
-    private val keepAlivePaint = Paint().apply {
-        style = Paint.Style.FILL
-    }
-    private val keepAliveRunnable = object : Runnable {
-        override fun run() {
-            if (isAttachedToWindow) {
-                postInvalidateOnAnimation()
-                postDelayed(this, 750L)
-            }
-        }
-    }
+    // Cached display metrics to avoid repeated JNI lookups on every 240Hz motion event
+    private var cachedWidthMm = 293.76f
+    private var cachedHeightMm = 183.60f
 
     init {
         isFocusable = true
@@ -172,17 +162,6 @@ class StylusCaptureView @JvmOverloads constructor(
             return PointerIcon.getSystemIcon(context, PointerIcon.TYPE_NULL)
         }
         return super.onResolvePointerIcon(event, pointerIndex)
-    }
-
-    override fun onAttachedToWindow() {
-        super.onAttachedToWindow()
-        removeCallbacks(keepAliveRunnable)
-        postDelayed(keepAliveRunnable, 750L)
-    }
-
-    override fun onDetachedFromWindow() {
-        removeCallbacks(keepAliveRunnable)
-        super.onDetachedFromWindow()
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
@@ -223,40 +202,7 @@ class StylusCaptureView @JvmOverloads constructor(
         toolType: Byte,
         buttonState: Byte
     ) {
-        val steps = when (settings.pollingRate) {
-            PollingRatePreset.HZ_1000 -> 4
-            PollingRatePreset.HZ_500 -> 2
-            else -> 1
-        }
-
-        if ((action == PacketConstants.ACTION_MOVE || action == PacketConstants.ACTION_HOVER) && steps > 1 && lastProcessedX >= 0f) {
-            val dx = rawX - lastProcessedX
-            val dy = rawY - lastProcessedY
-            val distSq = dx * dx + dy * dy
-            if (distSq > 0.12f) {
-                for (s in 1 until steps) {
-                    val t = s.toFloat() / steps
-                    val interX = lastProcessedX + dx * t
-                    val interY = lastProcessedY + dy * t
-                    val interPress = if (action == PacketConstants.ACTION_HOVER) {
-                        0f
-                    } else {
-                        lastProcessedPressure + (rawPressure - lastProcessedPressure) * t
-                    }
-                    processPointerPoint(
-                        action = action,
-                        rawX = interX,
-                        rawY = interY,
-                        rawPressure = interPress,
-                        rawTilt = rawTilt,
-                        rawOrientation = rawOrientation,
-                        toolType = toolType,
-                        buttonState = buttonState
-                    )
-                }
-            }
-        }
-
+        // Direct zero-latency dispatch of the true hardware coordinate without synthetic trailing interpolation
         processPointerPoint(
             action = action,
             rawX = rawX,
@@ -314,6 +260,9 @@ class StylusCaptureView @JvmOverloads constructor(
 
             activeRect.set(finalLeft, finalTop, finalLeft + activeWidthPx, finalTop + activeHeightPx)
         }
+
+        cachedWidthMm = activeRect.width() / pxPerMmX
+        cachedHeightMm = activeRect.height() / pxPerMmY
     }
 
     private fun findStylusPointerIndex(event: MotionEvent): Int {
@@ -394,6 +343,8 @@ class StylusCaptureView @JvmOverloads constructor(
             return true
         }
 
+        val nowUptime = SystemClock.uptimeMillis()
+
         // 1. Check for active hardware stylus (S-Pen / Lenovo Pen) across all pointers
         val stylusIdx = findStylusPointerIndex(event)
 
@@ -403,19 +354,21 @@ class StylusCaptureView @JvmOverloads constructor(
             if (!isHudVisibleState && event.actionMasked == MotionEvent.ACTION_DOWN) {
                 val cornerZonePx = 96f * resources.displayMetrics.density
                 if (event.x <= cornerZonePx && event.y <= cornerZonePx) {
-                    val now = SystemClock.uptimeMillis()
-                    if (now - lastCornerFingerTapMs in 40L..420L) {
+                    if (nowUptime - lastCornerFingerTapMs in 40L..420L) {
                         lastCornerFingerTapMs = 0L
                         onRequestShowHud?.invoke()
                         return true
                     }
-                    lastCornerFingerTapMs = now
+                    lastCornerFingerTapMs = nowUptime
                 }
             }
 
-            // Only block TOOL_TYPE_FINGER if BOTH strictPalmRejection is ON AND an active hardware stylus was actually used!
-            // This ensures capacitive/touch pens ALWAYS work reliably on phones and tablets!
-            if (settings.strictPalmRejection && hasDetectedActiveStylus) {
+            // Automatically reject resting palm (TOOL_TYPE_FINGER) whenever an active hardware stylus was used recently
+            // OR when strictPalmRejection is enabled. This guarantees a resting palm NEVER freezes or steals cursor
+            // during stylus hover/gameplay, while still allowing capacitive pens on phones or when stylus is set aside!
+            if (hasDetectedActiveStylus &&
+                (settings.strictPalmRejection || (nowUptime - lastStylusTime < ACTIVE_STYLUS_AUTO_PALM_REJECT_MS))
+            ) {
                 return true
             }
         }
@@ -425,7 +378,7 @@ class StylusCaptureView @JvmOverloads constructor(
         val isStylus = toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER
 
         if (isStylus) {
-            lastStylusTime = SystemClock.uptimeMillis()
+            lastStylusTime = nowUptime
             hasDetectedActiveStylus = true
         }
         isHovering = false
@@ -476,7 +429,6 @@ class StylusCaptureView @JvmOverloads constructor(
                 val clampedX = rawX.coerceIn(activeRect.left, activeRect.right)
                 val clampedY = rawY.coerceIn(activeRect.top, activeRect.bottom)
 
-                // Reset interpolation history on touch-down so capacitive pen never interpolates a line from previous lift-off point!
                 lastProcessedX = clampedX
                 lastProcessedY = clampedY
                 lastProcessedPressure = basePressure
@@ -485,10 +437,6 @@ class StylusCaptureView @JvmOverloads constructor(
                 isTouching = true
                 touchX = clampedX
                 touchY = clampedY
-                if (settings.showLocalInkTrail) {
-                    resetTrail()
-                    addTrailPoint(clampedX, clampedY)
-                }
 
                 emitPointWithInterpolation(
                     action = PacketConstants.ACTION_DOWN,
@@ -500,7 +448,11 @@ class StylusCaptureView @JvmOverloads constructor(
                     toolType = wireTool,
                     buttonState = buttonState
                 )
-                postInvalidateOnAnimation()
+                if (settings.showLocalInkTrail) {
+                    resetTrail()
+                    addTrailPoint(clampedX, clampedY)
+                    postInvalidateOnAnimation()
+                }
             }
 
             MotionEvent.ACTION_MOVE -> {
@@ -515,10 +467,6 @@ class StylusCaptureView @JvmOverloads constructor(
                         isTouching = true
                         touchX = clampedX
                         touchY = clampedY
-                        if (settings.showLocalInkTrail) {
-                            resetTrail()
-                            addTrailPoint(clampedX, clampedY)
-                        }
 
                         emitPointWithInterpolation(
                             action = PacketConstants.ACTION_DOWN,
@@ -530,7 +478,11 @@ class StylusCaptureView @JvmOverloads constructor(
                             toolType = wireTool,
                             buttonState = buttonState
                         )
-                        postInvalidateOnAnimation()
+                        if (settings.showLocalInkTrail) {
+                            resetTrail()
+                            addTrailPoint(clampedX, clampedY)
+                            postInvalidateOnAnimation()
+                        }
                     }
                 } else {
                     val clampedX = rawX.coerceIn(activeRect.left, activeRect.right)
@@ -539,40 +491,7 @@ class StylusCaptureView @JvmOverloads constructor(
                     touchX = clampedX
                     touchY = clampedY
 
-                    // 1. Process Historical Sub-frame Batching for full 240Hz hardware digitizer precision
-                    val historySize = event.historySize
-                    for (h in 0 until historySize) {
-                        val hX = event.getHistoricalX(pIdx, h).coerceIn(activeRect.left, activeRect.right)
-                        val hY = event.getHistoricalY(pIdx, h).coerceIn(activeRect.top, activeRect.bottom)
-                        val hPressure = event.getHistoricalPressure(pIdx, h)
-                        val hTilt = event.getHistoricalAxisValue(MotionEvent.AXIS_TILT, pIdx, h)
-                        val hOrient = event.getHistoricalAxisValue(MotionEvent.AXIS_ORIENTATION, pIdx, h)
-
-                        val hPress = if (toolType == MotionEvent.TOOL_TYPE_FINGER) {
-                            if (hPressure > 0.05f) hPressure else 1.0f
-                        } else {
-                            hPressure
-                        }
-
-                        if (settings.showLocalInkTrail) {
-                            addTrailPoint(hX, hY)
-                        }
-                        emitPointWithInterpolation(
-                            action = PacketConstants.ACTION_MOVE,
-                            rawX = hX,
-                            rawY = hY,
-                            rawPressure = hPress,
-                            rawTilt = hTilt,
-                            rawOrientation = hOrient,
-                            toolType = wireTool,
-                            buttonState = buttonState
-                        )
-                    }
-
-                    // 2. Process current latest point
-                    if (settings.showLocalInkTrail) {
-                        addTrailPoint(clampedX, clampedY)
-                    }
+                    // Dispatch the latest hardware coordinate FIRST for zero-latency response
                     emitPointWithInterpolation(
                         action = PacketConstants.ACTION_MOVE,
                         rawX = clampedX,
@@ -583,7 +502,17 @@ class StylusCaptureView @JvmOverloads constructor(
                         toolType = wireTool,
                         buttonState = buttonState
                     )
-                    postInvalidateOnAnimation()
+
+                    if (settings.showLocalInkTrail) {
+                        val historySize = event.historySize
+                        for (h in 0 until historySize) {
+                            val hX = event.getHistoricalX(pIdx, h).coerceIn(activeRect.left, activeRect.right)
+                            val hY = event.getHistoricalY(pIdx, h).coerceIn(activeRect.top, activeRect.bottom)
+                            addTrailPoint(hX, hY)
+                        }
+                        addTrailPoint(clampedX, clampedY)
+                        postInvalidateOnAnimation()
+                    }
                 }
             }
 
@@ -610,35 +539,39 @@ class StylusCaptureView @JvmOverloads constructor(
                 touchY = -1f
                 if (settings.showLocalInkTrail) {
                     resetTrail()
+                    postInvalidateOnAnimation()
                 }
-                postInvalidateOnAnimation()
             }
 
             MotionEvent.ACTION_CANCEL -> {
                 activeTouchPointerId = MotionEvent.INVALID_POINTER_ID
-                if (isStrokeInsideArea) {
+                val clampedX = rawX.coerceIn(activeRect.left, activeRect.right)
+                val clampedY = rawY.coerceIn(activeRect.top, activeRect.bottom)
+                if (isStrokeInsideArea || isStylus) {
                     emitPointWithInterpolation(
-                        action = PacketConstants.ACTION_UP,
-                        rawX = rawX.coerceIn(activeRect.left, activeRect.right),
-                        rawY = rawY.coerceIn(activeRect.top, activeRect.bottom),
+                        action = if (isStylus) PacketConstants.ACTION_HOVER else PacketConstants.ACTION_UP,
+                        rawX = clampedX,
+                        rawY = clampedY,
                         rawPressure = 0f,
-                        rawTilt = 0f,
-                        rawOrientation = 0f,
+                        rawTilt = event.getAxisValue(MotionEvent.AXIS_TILT, pIdx),
+                        rawOrientation = event.getAxisValue(MotionEvent.AXIS_ORIENTATION, pIdx),
                         toolType = wireTool,
                         buttonState = buttonState
                     )
                     isStrokeInsideArea = false
                 }
-                lastProcessedX = -1f
-                lastProcessedY = -1f
-                lastProcessedPressure = 0f
+                if (!isStylus) {
+                    lastProcessedX = -1f
+                    lastProcessedY = -1f
+                    lastProcessedPressure = 0f
+                }
                 isTouching = false
                 touchX = -1f
                 touchY = -1f
                 if (settings.showLocalInkTrail) {
                     resetTrail()
+                    postInvalidateOnAnimation()
                 }
-                postInvalidateOnAnimation()
             }
         }
 
@@ -670,7 +603,6 @@ class StylusCaptureView @JvmOverloads constructor(
                         requestUnbufferedDispatch(event)
                     }
 
-                    // Clamp hover coordinates to activeRect and process full 240Hz sub-frame hover history
                     val clampedX = rawX.coerceIn(activeRect.left, activeRect.right)
                     val clampedY = rawY.coerceIn(activeRect.top, activeRect.bottom)
                     isHovering = true
@@ -678,24 +610,7 @@ class StylusCaptureView @JvmOverloads constructor(
                     hoverX = clampedX
                     hoverY = clampedY
 
-                    val historySize = event.historySize
-                    for (h in 0 until historySize) {
-                        val hX = event.getHistoricalX(pIdx, h).coerceIn(activeRect.left, activeRect.right)
-                        val hY = event.getHistoricalY(pIdx, h).coerceIn(activeRect.top, activeRect.bottom)
-                        val hTilt = event.getHistoricalAxisValue(MotionEvent.AXIS_TILT, pIdx, h)
-                        val hOrient = event.getHistoricalAxisValue(MotionEvent.AXIS_ORIENTATION, pIdx, h)
-                        emitPointWithInterpolation(
-                            action = PacketConstants.ACTION_HOVER,
-                            rawX = hX,
-                            rawY = hY,
-                            rawPressure = 0f,
-                            rawTilt = hTilt,
-                            rawOrientation = hOrient,
-                            toolType = wireTool,
-                            buttonState = buttonState
-                        )
-                    }
-
+                    // Dispatch the latest hardware hover position immediately without historical queue buildup
                     emitPointWithInterpolation(
                         action = PacketConstants.ACTION_HOVER,
                         rawX = clampedX,
@@ -707,18 +622,34 @@ class StylusCaptureView @JvmOverloads constructor(
                         buttonState = buttonState
                     )
 
-                    postInvalidateOnAnimation()
+                    if (settings.showLocalInkTrail) {
+                        postInvalidateOnAnimation()
+                    }
                     return true
                 }
 
                 MotionEvent.ACTION_HOVER_EXIT -> {
-                    // Do NOT emit ACTION_CANCEL on hover exit because Android fires ACTION_HOVER_EXIT
-                    // immediately before ACTION_DOWN on every pen tap! Keeping last position avoids OTD resets.
+                    // Send the exit coordinate as a hover update so if ZUI palm policy briefly fires HOVER_EXIT,
+                    // the cursor continues smoothly to the latest position without freezing
+                    val clampedX = rawX.coerceIn(activeRect.left, activeRect.right)
+                    val clampedY = rawY.coerceIn(activeRect.top, activeRect.bottom)
+                    emitPointWithInterpolation(
+                        action = PacketConstants.ACTION_HOVER,
+                        rawX = clampedX,
+                        rawY = clampedY,
+                        rawPressure = 0f,
+                        rawTilt = event.getAxisValue(MotionEvent.AXIS_TILT, pIdx),
+                        rawOrientation = event.getAxisValue(MotionEvent.AXIS_ORIENTATION, pIdx),
+                        toolType = wireTool,
+                        buttonState = buttonState
+                    )
                     isHoverInsideArea = false
                     isHovering = false
                     hoverX = -1f
                     hoverY = -1f
-                    postInvalidateOnAnimation()
+                    if (settings.showLocalInkTrail) {
+                        postInvalidateOnAnimation()
+                    }
                     return true
                 }
             }
@@ -750,12 +681,6 @@ class StylusCaptureView @JvmOverloads constructor(
         // Convert Android tilt/orientation into standard Windows Tilt (-90 to +90 degrees)
         val (tiltX, tiltY) = calculateWindowsTilt(rawTilt, rawOrientation)
 
-        val dm = resources.displayMetrics
-        val xdpi = if (dm.xdpi > 30f) dm.xdpi else dm.densityDpi.toFloat()
-        val ydpi = if (dm.ydpi > 30f) dm.ydpi else dm.densityDpi.toFloat()
-        val activeWMm = activeW / (xdpi / 25.4f)
-        val activeHMm = activeH / (ydpi / 25.4f)
-
         val isFullScreenMode = settings.tabletArea.isFullScreen || settings.tabletArea.preset == OsuAreaPreset.FULL
         val finalButtons = if (isFullScreenMode) {
             (buttonState.toInt() or PacketConstants.BUTTON_FLAG_FULLSCREEN.toInt()).toByte()
@@ -773,8 +698,8 @@ class StylusCaptureView @JvmOverloads constructor(
             tiltY = tiltY,
             toolType = toolType,
             buttonState = finalButtons,
-            activeWidthMm = activeWMm,
-            activeHeightMm = activeHMm
+            activeWidthMm = cachedWidthMm,
+            activeHeightMm = cachedHeightMm
         )
 
         // Only notify Compose UI when the active tool type actually changes (e.g. Pen <-> Eraser)
@@ -826,12 +751,6 @@ class StylusCaptureView @JvmOverloads constructor(
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-
-        // 1x1 sub-perceptual pixel toggle at (0,0) forces RenderThread to queue a frame buffer to SurfaceFlinger
-        // so Lenovo ZUI's DisplayModeController NEVER times out after 2s and drops refresh rate from 144Hz to 30Hz!
-        keepAliveToggle = !keepAliveToggle
-        keepAlivePaint.color = if (keepAliveToggle) Color.argb(1, 10, 12, 18) else Color.argb(2, 10, 12, 18)
-        canvas.drawRect(0f, 0f, 1f, 1f, keepAlivePaint)
 
         val w = width.toFloat()
         val h = height.toFloat()

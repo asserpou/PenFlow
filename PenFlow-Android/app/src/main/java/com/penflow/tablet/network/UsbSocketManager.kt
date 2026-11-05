@@ -233,9 +233,24 @@ class UsbSocketManager(
 
     private fun enqueuePacket(buf: ByteArray) {
         synchronized(queueLock) {
-            // Bounded low-latency ring buffer (max 16 packets = ~1 frame at 1000Hz)
-            // Preserves 240Hz/1000Hz sub-frame smoothness while preventing multi-frame lag buildup
-            while (packetQueue.size >= 16) {
+            // Smart movement coalescing: if the last unread packet in the queue is also a continuous
+            // movement packet (Hover=0 or Move=2) with the same action and button flags, replace it in-place
+            // with the newest hardware coordinate so stale movement coordinates NEVER build up lag!
+            if (packetQueue.isNotEmpty() && buf[2] == PacketConstants.TYPE_POINTER) {
+                val action = buf[3]
+                if (action == PacketConstants.ACTION_HOVER || action == PacketConstants.ACTION_MOVE) {
+                    val lastIdx = packetQueue.size - 1
+                    val last = packetQueue[lastIdx]
+                    if (last[2] == PacketConstants.TYPE_POINTER && last[3] == action && last[21] == buf[21]) {
+                        packetQueue[lastIdx] = buf
+                        recycleBuffer(last)
+                        queueLock.notifyAll()
+                        return
+                    }
+                }
+            }
+
+            while (packetQueue.size >= 8) {
                 val dropped = packetQueue.removeAt(0)
                 recycleBuffer(dropped)
             }
