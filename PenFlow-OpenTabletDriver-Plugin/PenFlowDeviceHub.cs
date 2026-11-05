@@ -131,28 +131,22 @@ public sealed class PenFlowEndpointStream : IDeviceEndpointStream
         {
             if (_disposed) return;
 
-            // Smart movement coalescing: if OpenTabletDriver hasn't consumed the previous continuous
-            // movement packet (Hover=0 or Move=2) yet, replace it in-place with the latest coordinate
-            // so the cursor jumps directly to the true current pen position with zero trailing lag!
-            if (_queue.Count > 0 && packet24.Length >= 24 && packet24[2] == 0x01)
-            {
-                byte action = packet24[3];
-                if (action == 0 || action == 2)
-                {
-                    int lastIdx = _queue.Count - 1;
-                    byte[] last = _queue[lastIdx];
-                    if (last.Length >= 24 && last[2] == 0x01 && last[3] == action && last[21] == packet24[21])
-                    {
-                        _queue[lastIdx] = packet24;
-                        _signal.Set();
-                        return;
-                    }
-                }
-            }
-
+            // Allow up to 8 sub-step packets (1 full 1000Hz hardware burst) to pass through intact,
+            // while immediately dropping any older continuous movement packets if the queue exceeds 8
+            // so lag can NEVER accumulate and clicks (Down=1 / Up=3) are never lost!
             while (_queue.Count >= 8)
             {
-                _queue.RemoveAt(0);
+                int dropIdx = 0;
+                for (int i = 0; i < _queue.Count; i++)
+                {
+                    byte act = _queue[i][3];
+                    if (act == 0 || act == 2)
+                    {
+                        dropIdx = i;
+                        break;
+                    }
+                }
+                _queue.RemoveAt(dropIdx);
             }
 
             _queue.Add(packet24);

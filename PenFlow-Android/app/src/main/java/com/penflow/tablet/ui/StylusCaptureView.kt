@@ -202,7 +202,40 @@ class StylusCaptureView @JvmOverloads constructor(
         toolType: Byte,
         buttonState: Byte
     ) {
-        // Direct zero-latency dispatch of the true hardware coordinate without synthetic trailing interpolation
+        val steps = when (settings.pollingRate) {
+            PollingRatePreset.HZ_1000 -> 4
+            PollingRatePreset.HZ_500 -> 2
+            else -> 1
+        }
+
+        if ((action == PacketConstants.ACTION_MOVE || action == PacketConstants.ACTION_HOVER) && steps > 1 && lastProcessedX >= 0f) {
+            val dx = rawX - lastProcessedX
+            val dy = rawY - lastProcessedY
+            val distSq = dx * dx + dy * dy
+            if (distSq > 0.04f) {
+                for (s in 1 until steps) {
+                    val t = s.toFloat() / steps
+                    val interX = lastProcessedX + dx * t
+                    val interY = lastProcessedY + dy * t
+                    val interPress = if (action == PacketConstants.ACTION_HOVER) {
+                        0f
+                    } else {
+                        lastProcessedPressure + (rawPressure - lastProcessedPressure) * t
+                    }
+                    processPointerPoint(
+                        action = action,
+                        rawX = interX,
+                        rawY = interY,
+                        rawPressure = interPress,
+                        rawTilt = rawTilt,
+                        rawOrientation = rawOrientation,
+                        toolType = toolType,
+                        buttonState = buttonState
+                    )
+                }
+            }
+        }
+
         processPointerPoint(
             action = action,
             rawX = rawX,
@@ -491,7 +524,37 @@ class StylusCaptureView @JvmOverloads constructor(
                     touchX = clampedX
                     touchY = clampedY
 
-                    // Dispatch the latest hardware coordinate FIRST for zero-latency response
+                    // 1. Process hardware sub-frame history (240Hz digitizer samples) + 1000Hz micro-steps
+                    val historySize = event.historySize
+                    for (h in 0 until historySize) {
+                        val hX = event.getHistoricalX(pIdx, h).coerceIn(activeRect.left, activeRect.right)
+                        val hY = event.getHistoricalY(pIdx, h).coerceIn(activeRect.top, activeRect.bottom)
+                        val hPressure = event.getHistoricalPressure(pIdx, h)
+                        val hTilt = event.getHistoricalAxisValue(MotionEvent.AXIS_TILT, pIdx, h)
+                        val hOrient = event.getHistoricalAxisValue(MotionEvent.AXIS_ORIENTATION, pIdx, h)
+
+                        val hPress = if (toolType == MotionEvent.TOOL_TYPE_FINGER) {
+                            if (hPressure > 0.05f) hPressure else 1.0f
+                        } else {
+                            hPressure
+                        }
+
+                        if (settings.showLocalInkTrail) {
+                            addTrailPoint(hX, hY)
+                        }
+                        emitPointWithInterpolation(
+                            action = PacketConstants.ACTION_MOVE,
+                            rawX = hX,
+                            rawY = hY,
+                            rawPressure = hPress,
+                            rawTilt = hTilt,
+                            rawOrientation = hOrient,
+                            toolType = wireTool,
+                            buttonState = buttonState
+                        )
+                    }
+
+                    // 2. Process current latest point
                     emitPointWithInterpolation(
                         action = PacketConstants.ACTION_MOVE,
                         rawX = clampedX,
@@ -504,12 +567,6 @@ class StylusCaptureView @JvmOverloads constructor(
                     )
 
                     if (settings.showLocalInkTrail) {
-                        val historySize = event.historySize
-                        for (h in 0 until historySize) {
-                            val hX = event.getHistoricalX(pIdx, h).coerceIn(activeRect.left, activeRect.right)
-                            val hY = event.getHistoricalY(pIdx, h).coerceIn(activeRect.top, activeRect.bottom)
-                            addTrailPoint(hX, hY)
-                        }
                         addTrailPoint(clampedX, clampedY)
                         postInvalidateOnAnimation()
                     }
@@ -610,7 +667,25 @@ class StylusCaptureView @JvmOverloads constructor(
                     hoverX = clampedX
                     hoverY = clampedY
 
-                    // Dispatch the latest hardware hover position immediately without historical queue buildup
+                    // Process full 240Hz hardware hover history + 1000Hz sub-stepping without triggering UI redraws
+                    val historySize = event.historySize
+                    for (h in 0 until historySize) {
+                        val hX = event.getHistoricalX(pIdx, h).coerceIn(activeRect.left, activeRect.right)
+                        val hY = event.getHistoricalY(pIdx, h).coerceIn(activeRect.top, activeRect.bottom)
+                        val hTilt = event.getHistoricalAxisValue(MotionEvent.AXIS_TILT, pIdx, h)
+                        val hOrient = event.getHistoricalAxisValue(MotionEvent.AXIS_ORIENTATION, pIdx, h)
+                        emitPointWithInterpolation(
+                            action = PacketConstants.ACTION_HOVER,
+                            rawX = hX,
+                            rawY = hY,
+                            rawPressure = 0f,
+                            rawTilt = hTilt,
+                            rawOrientation = hOrient,
+                            toolType = wireTool,
+                            buttonState = buttonState
+                        )
+                    }
+
                     emitPointWithInterpolation(
                         action = PacketConstants.ACTION_HOVER,
                         rawX = clampedX,

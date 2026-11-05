@@ -233,25 +233,19 @@ class UsbSocketManager(
 
     private fun enqueuePacket(buf: ByteArray) {
         synchronized(queueLock) {
-            // Smart movement coalescing: if the last unread packet in the queue is also a continuous
-            // movement packet (Hover=0 or Move=2) with the same action and button flags, replace it in-place
-            // with the newest hardware coordinate so stale movement coordinates NEVER build up lag!
-            if (packetQueue.isNotEmpty() && buf[2] == PacketConstants.TYPE_POINTER) {
-                val action = buf[3]
-                if (action == PacketConstants.ACTION_HOVER || action == PacketConstants.ACTION_MOVE) {
-                    val lastIdx = packetQueue.size - 1
-                    val last = packetQueue[lastIdx]
-                    if (last[2] == PacketConstants.TYPE_POINTER && last[3] == action && last[21] == buf[21]) {
-                        packetQueue[lastIdx] = buf
-                        recycleBuffer(last)
-                        queueLock.notifyAll()
-                        return
+            // Allow up to 8 sub-step packets (1 full 1000Hz hardware burst) to pass through intact,
+            // while immediately dropping any older continuous movement packets if the queue exceeds 8
+            // so lag can NEVER accumulate!
+            while (packetQueue.size >= 8) {
+                var droppedIdx = 0
+                for (i in 0 until packetQueue.size) {
+                    val act = packetQueue[i][3]
+                    if (act == PacketConstants.ACTION_HOVER || act == PacketConstants.ACTION_MOVE) {
+                        droppedIdx = i
+                        break
                     }
                 }
-            }
-
-            while (packetQueue.size >= 8) {
-                val dropped = packetQueue.removeAt(0)
+                val dropped = packetQueue.removeAt(droppedIdx)
                 recycleBuffer(dropped)
             }
 
