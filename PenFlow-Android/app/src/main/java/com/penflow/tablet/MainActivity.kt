@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
@@ -119,6 +120,21 @@ class MainActivity : ComponentActivity() {
         insetsController.systemBarsBehavior =
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         insetsController.hide(WindowInsetsCompat.Type.systemBars())
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            disableHandwritingRecursively(window.decorView)
+            window.decorView.post { disableHandwritingRecursively(window.decorView) }
+        }
+    }
+
+    private fun disableHandwritingRecursively(view: View?) {
+        if (view == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
+        view.isAutoHandwritingEnabled = false
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) {
+                disableHandwritingRecursively(view.getChildAt(i))
+            }
+        }
     }
 
     private fun requestMaxRefreshRate() {

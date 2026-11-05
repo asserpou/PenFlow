@@ -15,6 +15,7 @@ import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.PointerIcon
 import android.view.View
+import android.view.ViewGroup
 import com.penflow.tablet.model.AspectRatioMode
 import com.penflow.tablet.model.OsuAreaPreset
 import com.penflow.tablet.model.PacketConstants
@@ -141,6 +142,7 @@ class StylusCaptureView @JvmOverloads constructor(
     init {
         isFocusable = true
         isFocusableInTouchMode = true
+        keepScreenOn = true
         // Ensure this view receives hover events
         isHovered = true
 
@@ -157,6 +159,50 @@ class StylusCaptureView @JvmOverloads constructor(
         }
     }
 
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        disableAutoHandwritingOnHierarchy()
+        post { disableAutoHandwritingOnHierarchy() }
+        updateGestureExclusionRects()
+    }
+
+    private fun disableAutoHandwritingOnHierarchy() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            var current: View? = this
+            while (current != null) {
+                current.isAutoHandwritingEnabled = false
+                current = current.parent as? View
+            }
+            disableAutoHandwritingRecursive(rootView)
+        }
+    }
+
+    private fun disableAutoHandwritingRecursive(view: View?) {
+        if (view == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
+        view.isAutoHandwritingEnabled = false
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) {
+                disableAutoHandwritingRecursive(view.getChildAt(i))
+            }
+        }
+    }
+
+    private fun updateGestureExclusionRects() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && width > 0 && height > 0) {
+            // Android WindowManagerService enforces a strict 200dp per-edge quota on systemGestureExclusionRects
+            // from top to bottom. Requesting >200dp causes the bottom of the screen to be unprotected!
+            // Keep a single <= 195dp band positioned directly over the active tablet area / bottom edge.
+            val maxQuotaPx = (195f * resources.displayMetrics.density).toInt().coerceIn(1, height)
+            val targetBottom = if (activeRect.height() > 0f) {
+                activeRect.bottom.toInt().coerceIn(maxQuotaPx, height)
+            } else {
+                height
+            }
+            val targetTop = (targetBottom - maxQuotaPx).coerceAtLeast(0)
+            systemGestureExclusionRects = listOf(Rect(0, targetTop, width, targetBottom))
+        }
+    }
+
     override fun onResolvePointerIcon(event: MotionEvent, pointerIndex: Int): PointerIcon? {
         if (!settings.showLocalInkTrail && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             return PointerIcon.getSystemIcon(context, PointerIcon.TYPE_NULL)
@@ -167,17 +213,7 @@ class StylusCaptureView @JvmOverloads constructor(
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         recalculateActiveArea()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && w > 0 && h > 0) {
-            val maxStripH = (180f * resources.displayMetrics.density).toInt().coerceAtLeast(100)
-            val rects = mutableListOf<Rect>()
-            var y = 0
-            while (y < h) {
-                val bottom = (y + maxStripH).coerceAtMost(h)
-                rects.add(Rect(0, y, w, bottom))
-                y += maxStripH
-            }
-            systemGestureExclusionRects = rects
-        }
+        updateGestureExclusionRects()
     }
 
     private fun addTrailPoint(x: Float, y: Float) {
@@ -296,6 +332,7 @@ class StylusCaptureView @JvmOverloads constructor(
 
         cachedWidthMm = activeRect.width() / pxPerMmX
         cachedHeightMm = activeRect.height() / pxPerMmY
+        updateGestureExclusionRects()
     }
 
     private fun findStylusPointerIndex(event: MotionEvent): Int {
@@ -615,7 +652,9 @@ class StylusCaptureView @JvmOverloads constructor(
                         toolType = wireTool,
                         buttonState = buttonState
                     )
-                    isStrokeInsideArea = false
+                    if (!isStylus) {
+                        isStrokeInsideArea = false
+                    }
                 }
                 if (!isStylus) {
                     lastProcessedX = -1f
@@ -643,6 +682,7 @@ class StylusCaptureView @JvmOverloads constructor(
         if (toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER) {
             lastStylusTime = SystemClock.uptimeMillis()
             hasDetectedActiveStylus = true
+            parent?.requestDisallowInterceptTouchEvent(true)
 
             val wireTool = if (toolType == MotionEvent.TOOL_TYPE_ERASER) {
                 PacketConstants.TOOL_ERASER
